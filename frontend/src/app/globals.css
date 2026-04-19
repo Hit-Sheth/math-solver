@@ -192,7 +192,7 @@ body {
   display: block;
   cursor: crosshair;
   border-radius: var(--radius-md);
-  background: #0d0d12;
+  background: #ffffff;
   touch-action: none;
 }
 

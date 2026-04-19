@@ -95,12 +95,6 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
 
     arr = np.array(img, dtype=np.float32)
 
-    # Check if image is mostly white (inverted canvas)
-    # Canvas: white stroke on black bg → we want white-on-black (like the dataset)
-    # If the mean is high, the image is mostly white → invert it
-    if arr.mean() > 127:
-        arr = 255.0 - arr
-
     # Normalize to [0, 1]
     arr = arr / 255.0
 

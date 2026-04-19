@@ -76,7 +76,7 @@ function useCanvas(canvasRef: React.RefObject<HTMLCanvasElement | null>) {
       ctx.beginPath();
       ctx.moveTo(prev.x, prev.y);
       ctx.lineTo(pos.x, pos.y);
-      ctx.strokeStyle = "#ffffff";
+      ctx.strokeStyle = "#000000";
       ctx.lineWidth = 14;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
@@ -97,7 +97,7 @@ function useCanvas(canvasRef: React.RefObject<HTMLCanvasElement | null>) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.fillStyle = "#0d0d12";
+    ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }, [canvasRef]);
 
