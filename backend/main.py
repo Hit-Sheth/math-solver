@@ -14,6 +14,7 @@ import io
 from pathlib import Path
 
 import numpy as np
+import cv2
 from PIL import Image, ImageOps
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,28 +81,67 @@ def load_model():
 
 # ── Image Preprocessing ───────────────────────────────────────────────────────
 
-def preprocess_image(image_bytes: bytes) -> np.ndarray:
+def segment_image(image_bytes: bytes, combine_all: bool = False) -> list[np.ndarray]:
     """
-    Preprocess a canvas image for prediction:
-    - Convert to grayscale
-    - Resize to 28x28
-    - The canvas sends white strokes on black background
-    - Normalize to [0, 1]
+    Segment the canvas into individual symbols from left to right.
+    Returns a list of preprocessed 28x28 arrays ready for prediction.
     """
     img = Image.open(io.BytesIO(image_bytes)).convert("L")
+    arr = np.array(img, dtype=np.uint8)
 
-    # Resize to 28x28
-    img = img.resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS)
+    # Binarize. Canvas is white bg, black ink.
+    # Inverse threshold so ink is white (required for findContours)
+    _, thresh = cv2.threshold(arr, 128, 255, cv2.THRESH_BINARY_INV)
 
-    arr = np.array(img, dtype=np.float32)
+    # Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Normalize to [0, 1]
-    arr = arr / 255.0
+    bboxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        # Filter out noise (lower threshold to catch division dots)
+        if w > 3 and h > 3:
+            bboxes.append((x, y, w, h))
 
-    # Reshape for model input: (1, 28, 28, 1)
-    arr = arr.reshape(1, IMG_SIZE, IMG_SIZE, 1)
+    if not bboxes:
+        return []
 
-    return arr
+    if combine_all:
+        x_min = min(b[0] for b in bboxes)
+        y_min = min(b[1] for b in bboxes)
+        x_max = max(b[0] + b[2] for b in bboxes)
+        y_max = max(b[1] + b[3] for b in bboxes)
+        bboxes = [(x_min, y_min, x_max - x_min, y_max - y_min)]
+    else:
+        # Sort bounding boxes left-to-right (by x coordinate)
+        bboxes.sort(key=lambda b: b[0])
+
+    crops = []
+    for (x, y, w, h) in bboxes:
+        crop = arr[y:y+h, x:x+w]
+
+        # Make crop square with padding
+        max_dim = max(w, h)
+        padding = int(max_dim * 0.2)
+        target_size = max_dim + (padding * 2)
+
+        # White square
+        square = np.full((target_size, target_size), 255, dtype=np.uint8)
+
+        # Center crop in square
+        y_off = (target_size - h) // 2
+        x_off = (target_size - w) // 2
+        square[y_off:y_off+h, x_off:x_off+w] = crop
+
+        # Resize to 28x28
+        pil_sq = Image.fromarray(square).resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS)
+        res_arr = np.array(pil_sq, dtype=np.float32)
+
+        # Normalize [0, 1]
+        res_arr = res_arr / 255.0
+        crops.append(res_arr.reshape(1, IMG_SIZE, IMG_SIZE, 1))
+
+    return crops
 
 
 def is_canvas_empty(image_bytes: bytes) -> bool:
@@ -123,20 +163,33 @@ def is_canvas_empty(image_bytes: bytes) -> bool:
 
 # ── Prediction ─────────────────────────────────────────────────────────────────
 
-def predict_symbol(image_bytes: bytes) -> tuple[str, float]:
-    """Predict the symbol from image bytes. Returns (label, confidence)."""
+def predict_symbols(image_bytes: bytes, combine_all: bool = False) -> tuple[str, float]:
+    """Segment image and predict all symbols. Returns (combined_label, average_confidence)."""
     if model is None or label_map is None:
         raise HTTPException(
             status_code=503,
             detail="Model not loaded. Please train the model first.",
         )
 
-    processed = preprocess_image(image_bytes)
-    predictions = model.predict(processed, verbose=0)
-    class_idx = int(np.argmax(predictions[0]))
-    confidence = float(predictions[0][class_idx])
+    crops = segment_image(image_bytes, combine_all=combine_all)
+    if not crops:
+        return "", 0.0
 
-    return label_map[class_idx], confidence
+    labels = []
+    confidences = []
+
+    for crop in crops:
+        predictions = model.predict(crop, verbose=0)
+        class_idx = int(np.argmax(predictions[0]))
+        confidence = float(predictions[0][class_idx])
+        
+        labels.append(label_map[class_idx])
+        confidences.append(confidence)
+
+    combined_label = "".join(labels)
+    avg_conf = sum(confidences) / len(confidences)
+
+    return combined_label, avg_conf
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -180,28 +233,28 @@ async def solve(
     if is_canvas_empty(img2_bytes):
         raise HTTPException(status_code=400, detail="Operand 2 canvas is empty. Please draw a digit.")
 
-    # Predict each symbol
-    pred1, conf1 = predict_symbol(img1_bytes)
-    pred_op, conf_op = predict_symbol(op_bytes)
-    pred2, conf2 = predict_symbol(img2_bytes)
+    # Predict symbols
+    pred1, conf1 = predict_symbols(img1_bytes)
+    pred_op, conf_op = predict_symbols(op_bytes, combine_all=True)
+    pred2, conf2 = predict_symbols(img2_bytes)
 
-    # Validate predictions
-    if pred1 not in DIGIT_LABELS:
+    # Validate predictions (allowing multi-digit logic)
+    if not pred1 or not all(c in DIGIT_LABELS for c in pred1):
         raise HTTPException(
             status_code=422,
-            detail=f"Operand 1 was recognized as '{pred1}' (confidence: {conf1:.0%}), but expected a digit (0-9). Try drawing more clearly.",
+            detail=f"Operand 1 was recognized as '{pred1}', but expected only digits (0-9). Try drawing more clearly.",
         )
 
-    if pred_op not in OPERATOR_LABELS:
+    if not pred_op or pred_op not in OPERATOR_LABELS:
         raise HTTPException(
             status_code=422,
-            detail=f"Operator was recognized as '{pred_op}' (confidence: {conf_op:.0%}), but expected an operator (+, -, *, /). Try drawing more clearly.",
+            detail=f"Operator was recognized as '{pred_op}', but expected exactly one operator (+, -, *, /). Try drawing more clearly.",
         )
 
-    if pred2 not in DIGIT_LABELS:
+    if not pred2 or not all(c in DIGIT_LABELS for c in pred2):
         raise HTTPException(
             status_code=422,
-            detail=f"Operand 2 was recognized as '{pred2}' (confidence: {conf2:.0%}), but expected a digit (0-9). Try drawing more clearly.",
+            detail=f"Operand 2 was recognized as '{pred2}', but expected only digits (0-9). Try drawing more clearly.",
         )
 
     # Compute result

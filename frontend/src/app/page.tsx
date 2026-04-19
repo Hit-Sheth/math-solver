@@ -115,10 +115,12 @@ function CanvasCard({
   label,
   type,
   canvasRef,
+  width,
 }: {
   label: string;
   type: "digit" | "operator";
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  width: number;
 }) {
   const { startDrawing, draw, stopDrawing, clear } = useCanvas(canvasRef);
 
@@ -132,9 +134,9 @@ function CanvasCard({
       <div className="canvas-wrapper">
         <canvas
           ref={canvasRef}
-          width={280}
-          height={280}
-          style={{ width: 220, height: 220 }}
+          width={width}
+          height={250}
+          style={{ width: width, height: 250 }}
           onMouseDown={startDrawing}
           onMouseMove={draw}
           onMouseUp={stopDrawing}
@@ -244,16 +246,19 @@ export default function Home() {
           label="Operand 1"
           type="digit"
           canvasRef={canvas1Ref}
+          width={350}
         />
         <CanvasCard
           label="Operator"
           type="operator"
           canvasRef={canvasOpRef}
+          width={200}
         />
         <CanvasCard
           label="Operand 2"
           type="digit"
           canvasRef={canvas2Ref}
+          width={350}
         />
       </section>
 
